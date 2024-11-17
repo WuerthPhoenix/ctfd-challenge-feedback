@@ -1,177 +1,201 @@
-$(document).ready(function() {
+String.prototype.format = function () {
+    const args = arguments;
+    return this.replace(/{([0-9]+)}/g, function (match, index) {
+        return typeof args[index] == 'undefined' ? match : args[index];
+    });
+};
 
-    var feedbackInlineForm = 
-    '    <div id="chal-feedback-group">' +
-    '      <hr><h4 class="text-center pb-3">Give Feedback</h4>' +
-    '      <form id="chal-feedback-form" method="POST" action="/chal/\{0\}/feedbacks/answer">' +
-    '        <input id="nonce" name="nonce" type="hidden" value="\{1\}">' +
-    '        <div class="form-group">' +
-    '          <div id="input-fields"></div>' +
-    '        </div>' +
-    '        <div class="form-group">' +
-    '          <button id="feedback-submit-button" type="submit" class="btn btn-primary">Submit</button>' +
-    '        </div>' +
-    '        <div class="form-group">' +
-    '          <div id="feedback-result-notification" class="alert alert-dismissable text-center w-100" role="alert" style="display: none;">' +
-    '            <strong id="feedback-result-message"></strong>' +
-    '          </div>' +
-    '        </div>' +
-    '      </form>' +
-    '    </div>';
+const FEEDBACK_TYPES = {
+    RATING: 0,
+    TEXT: 1
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    var feedbackInlineForm = `<div id="chal-feedback-group">
+      <br>
+      <h4 class="text-center pb-1">Give Feedback</h4>
+      
+      <form id="chal-feedback-form" method="POST" action="/chal/{0}/feedbacks/answer" class="form-horizontal max-500px center bg-form bg-form--no-bg">
+        <input id="nonce" name="nonce" type="hidden" value="{1}">
+        
+        <div id="input-fields"></div>
+        
+        <div class="row">
+            <div class="col-6 pe-0">
+                <div id="feedback-result-notification" class="alert alert-success alert-dismissable text-center w-100 mb-0 h-100" role="alert" style="display: none;">
+                    <strong id="feedback-result-message"></strong>
+                </div>
+            </div>
+            <div class="col-6">
+                <button id="feedback-submit-button" class="btn btn-primary btn-block flex-column" name="_submit" type="submit" value="Submit">Submit</button>
+            </div>
+        </div>
+      </form>
+    </div>`;
+
 
     var chalid = -1;
     var visibleFeedbackForm = null;
 
-    (function() {
-        try {
-            var old_updateChalWindow = updateChalWindow;
-            updateChalWindow = function(obj) {
-                old_updateChalWindow(obj);
-                
-                $('#chal-window').one('shown.bs.modal', function(e) {
-                    chalid = obj.id;
-                    visibleFeedbackForm = null;
-                    showFeedbackForm(false);
-                });
-            }
-        } catch (err) {
-            console.log('updateChalWindow not defined');
-        }
+    // Show feedback form when challenge window is shown
+    document.getElementById('challenge-window').addEventListener('shown.bs.modal', function (event) {
+        chalid = document.querySelector("#challenge-window [x-init^='id =']").getAttribute('x-init').split('=')[1].trim();
+        visibleFeedbackForm = null;
+        showFeedbackForm(false);
+    });
 
-        try {
-            var old_renderSubmissionResponse = renderSubmissionResponse;
-            renderSubmissionResponse = function (data, cb) {
-                old_renderSubmissionResponse(data, cb);
-                var result = $.parseJSON(JSON.stringify(data));
-                if (result.status == 1) {           // Challenge first solved
+    // Show feedback form when challenge is submitted
+    document.addEventListener("click", function(event) {
+        if (event.target.id === "challenge-submit") {
+            const observer = new MutationObserver((mutations) => {
+                const alertElement = document.querySelector(".alert");
+                if (alertElement) {
                     showFeedbackForm(true);
-                } else if (result.status == 2) {    // Challenge already solved
-                    showFeedbackForm(false);
+                    observer.disconnect();
                 }
+            });
+
+            const targetNode = document.querySelector(".notification-row");
+            if (targetNode) {
+                observer.observe(targetNode, { childList: true, subtree: true });
             }
-        } catch (err) {
-            console.log('renderSubmissionResponse not defined');
         }
-    })();
+    });
 
     function showFeedbackForm(isScrollTo = false) {
         if (visibleFeedbackForm != null) {
             return;
         }
-        $.get(script_root + '/chal/{0}/feedbacks'.format(chalid), function(data) {
-            if (data.feedbacks.length <= 0) {
+
+        fetch(CTFd.config.urlRoot +`/chal/${chalid}/feedbacks`)
+        .then(response => response.json())
+        .then(data => {
+
+            if (!data.feedbacks || data.feedbacks.length <= 0) {
                 return;
             }
-            
-            var nonce = $('#nonce').val();
-            var res = feedbackInlineForm.format(chalid, nonce);
-            var obj = $(res);
+
+            var res = feedbackInlineForm.format(chalid, CTFd.config.csrfNonce);
+
+            var obj = CTFd.lib.$(res);
             visibleFeedbackForm = obj;
 
             var inputFields = obj.find("#input-fields");
 
             for (var i = 0; i < data.feedbacks.length; i++) {
-                var feedback = data.feedbacks[i];
-                
-                var formgroup = $("<div>", { class : "form-group" });
-                switch(feedback.type) {
-                    case 0: // rating
-                        var label = $("<label>", {
-                            for : "feedback-" + feedback.id,
-                            html : feedback.question,
-                        });
-                        var select = $("<select>", {
-                            id : "feedback-" + feedback.id,
-                            name : "feedback-" + feedback.id,
-                            class : "form-control",
-                        }).css("padding", ".375rem .75rem");
+                const feedback = data.feedbacks[i];
 
-                        var ratingLowLabel = "";
-                        var ratingHighLabel = "";
-                        if (feedback.extraarg1 != "") {
+                const formgroup = document.createElement("div");
+                formgroup.className = "mb-3";
+
+                const b = document.createElement("b");
+                let label;
+
+                switch(feedback.type) {
+                    case FEEDBACK_TYPES.RATING:
+                        label = document.createElement("label");
+                        label.setAttribute("for", "feedback-" + feedback.id);
+                        label.innerHTML = feedback.question;
+
+                        let select = document.createElement("select");
+                        select.id = "feedback-" + feedback.id;
+                        select.name = "feedback-" + feedback.id;
+                        select.className = "form-control form-select form-select--reset";
+
+                        let ratingLowLabel = "";
+                        let ratingHighLabel = "";
+                        if (feedback.extraarg1 !== "") {
                             ratingLowLabel = " - " + feedback.extraarg1;
                         }
-                        if (feedback.extraarg2 != "") {
+                        if (feedback.extraarg2 !== "") {
                             ratingHighLabel = " - " + feedback.extraarg2;
                         }
-                        select.append("<option value='1'>1" + ratingLowLabel + "</option>");
-                        for (var optioni = 2; optioni <= 4; optioni++) {
-                            select.append("<option value='" + optioni + "'>" + optioni + "</option>");
+
+                        let option = document.createElement("option");
+                        option.value = 1;
+                        option.innerHTML = "1" + ratingLowLabel;
+                        select.appendChild(option);
+                        for (let optioni = 2; optioni <= 4; optioni++) {
+                            option = document.createElement("option");
+                            option.value = optioni;
+                            option.innerHTML = optioni;
+                            select.appendChild(option);
                         }
-                        select.append("<option value='5'>5" + ratingHighLabel + "</option>");
-                        
-                        if (feedback.answer != "") {
-                            select.val(feedback.answer);
+
+                        let option5 = document.createElement("option");
+                        option5.value = 5;
+                        option5.innerHTML = "5" + ratingHighLabel;
+                        select.appendChild(option5);
+
+                        if (feedback.answer !== "") {
+                            select.value = feedback.answer;
                         }
-                        formgroup.append(label);
+
+                        b.append(label);
+                        formgroup.append(b);
                         formgroup.append(select);
                         break;
-                    case 1: // text
-                        var label = $("<label>", {
-                            for : "feedback-" + feedback.id,
-                            html : feedback.question,
-                        });
-                        var input = $("<input>", {
-                            type : "text",
-                            id : "feedback-" + feedback.id,
-                            name : "feedback-" + feedback.id,
-                            class : "form-control",
-                            pattern : ".{1,}",
-                            value : feedback.answer,
-                        }).prop("required", true)
-                          .css("padding", ".375rem .75rem");
-                        formgroup.append(label);
+
+                    case FEEDBACK_TYPES.TEXT:
+                        label = document.createElement("label");
+                        label.setAttribute("for", "feedback-" + feedback.id);
+                        label.innerHTML = feedback.question;
+
+                        let input = document.createElement("input");
+                        input.type = "text";
+                        input.id = "feedback-" + feedback.id;
+                        input.name = "feedback-" + feedback.id;
+                        input.className = "form-control";
+                        input.pattern = ".{1,}";
+                        input.value = feedback.answer;
+                        input.required = true;
+
+                        b.append(label);
+                        formgroup.append(b);
                         formgroup.append(input);
                         break;
                 }
                 inputFields.append(formgroup);
             }
-            
-            obj.find("#feedback-submit-button").click(function(e) {
+
+            obj.find("#feedback-submit-button").get(0).addEventListener("click", function(e) {
                 e.preventDefault();
                 e.stopPropagation();
-                var submitButton = $(this);
+                var submitButton = CTFd.lib.$(this);
                 submitButton.addClass("disabled-button");
                 submitButton.prop('disabled', true);
-                
-                $.post( script_root + '/chal/' + chalid + '/feedbacks/answer', 
-                        obj.find("#chal-feedback-form").serialize(), 
-                        function(data) 
-                {
-                    var result = $.parseJSON(JSON.stringify(data));
 
-                    var result_message = obj.find('#feedback-result-message');
-                    var result_notification = obj.find('#feedback-result-notification');
-                    result_notification.removeClass();
-                    result_message.text(result.message);
+                fetch(CTFd.config.urlRoot + '/chal/' + chalid + '/feedbacks/answer',
+                    {
+                        method: "POST",
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded'
+                        },
+                        body: new URLSearchParams(new FormData(obj.find("#chal-feedback-form").get(0)))
+                        // data: obj.find("#chal-feedback-form").serialize(),
+                    })
+                    .then(response => response.json())
+                    .then(result => {
+                        var result_message = obj.find('#feedback-result-message');
+                        var result_notification = obj.find('#feedback-result-notification');
+                        result_message.text(result.message);
+                        result_notification.show();
 
-                    if (result.status == 0) {           // Success
-                        result_notification.addClass('alert alert-success alert-dismissable text-center');
-                        result_notification.slideDown();
-                    } else if (result.status == 1) {    // Error
-                        result_notification.addClass('alert alert-danger alert-dismissable text-center');
-                        result_notification.slideDown();
-                    }
+
+                        setTimeout(function () {
+                            CTFd.lib.$('.alert').hide();
+                            submitButton.removeClass("disabled-button");
+                            submitButton.prop('disabled', false);
+                        }, 3000);
+                    })
+                    .catch((error) => {
+                        console.error('Error:', error);
+                    });
                 });
-
-                setTimeout(function () {
-                    $('.alert').slideUp();
-                    submitButton.removeClass("disabled-button");
-                    submitButton.prop('disabled', false);
-                }, 3000);
-            });
             
-            $("#challenge").append(obj);
-            obj.hide();
-            obj.slideDown(400, function() {
-                if (isScrollTo) {
-                    setTimeout(function () {
-                        $("#chal-window").animate({
-                            scrollTop: obj.position().top,
-                        }, 400);
-                    }, 1500);
-                }
-            });
+            CTFd.lib.$("#challenge").append(obj);
+            // Scroll to the feedback form
+            document.getElementById('chal-feedback-group').scrollIntoView({behavior: "smooth", block: "end"});
         });
     }
 

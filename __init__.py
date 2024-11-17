@@ -11,25 +11,23 @@ from flask import (
     send_file
 )
 
-import datafreeze
-import dataset
+import json
+import io
 import datetime
-import six
-import zipfile
+import csv
 
-from CTFd import utils, challenges
-from CTFd.challenges import challenges_view
-from CTFd.models import db, Challenges, Teams, Solves, WrongKeys
-from CTFd.utils import is_admin, get_app_config
+from CTFd.models import db, Challenges, Teams, Solves, Fails
 from CTFd.utils.decorators import (
     authed_only,
     admins_only,
-    during_ctf_time_only,
-    require_verified_emails,
-    viewable_without_authentication
+    require_verified_emails
 )
+from CTFd.plugins import register_plugin_assets_directory, bypass_csrf_protection
+from CTFd.utils.plugins import register_script
+from CTFd.utils.user import is_admin, authed, is_verified
+from CTFd.utils.user import get_current_team
 
-from sqlalchemy.sql import and_, expression
+from sqlalchemy.sql import and_
 
 class ChallengeFeedbackQuestions(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -60,13 +58,14 @@ class ChallengeFeedbackAnswers(db.Model):
 
 def load(app):
     app.db.create_all()
-    
+
     challenge_feedback = Blueprint('challenge_feedback', __name__, template_folder='templates')
     challenge_feedback_static = Blueprint('challenge_feedback_static', __name__, static_folder='static')
     app.register_blueprint(challenge_feedback)
     app.register_blueprint(challenge_feedback_static, url_prefix='/challenge-feedback')
 
-    utils.register_plugin_script("/challenge-feedback/static/challenge-feedback-chal-window.js")
+    register_plugin_assets_directory(app, base_path="/plugins/ctfd-challenge-feedback/static/")
+    register_script("/plugins/ctfd-challenge-feedback/static/challenge-feedback-chal-window.js")
 
     @app.route('/admin/plugins/challenge-feedback', methods=['GET'])
     @admins_only
@@ -92,21 +91,20 @@ def load(app):
         return jsonify(data)
 
     @app.route('/chal/<int:chalid>/feedbacks', methods=['GET'])
-    @require_verified_emails
-    @viewable_without_authentication(status_code=403)
+    @authed_only
     def chal_feedbacks(chalid):
-        teamid = session.get('id')
+        team = get_current_team()
+        teamid = team.id
         # Get solved challenge ids
         solves = []
-        if utils.user_can_view_challenges():
-            if utils.authed():
-                solves = Solves.query\
-                    .join(Teams, Solves.teamid == Teams.id)\
-                    .filter(Solves.teamid == session['id'])\
-                    .all()
+        if authed():
+            solves = Solves.query\
+                .join(Teams, Solves.team_id == Teams.id)\
+                .filter(Solves.team_id == teamid)\
+                .all()
         solve_ids = []
         for solve in solves:
-            solve_ids.append(solve.chalid)
+            solve_ids.append(solve.challenge_id)
 
         # Return nothing if challenge is not solved
         if chalid not in solve_ids:
@@ -116,15 +114,15 @@ def load(app):
         feedbacks = []
         for feedback in ChallengeFeedbackQuestions.query.filter_by(chalid=chalid).all():
             answer_entry = ChallengeFeedbackAnswers.query.filter(and_(
-                ChallengeFeedbackAnswers.questionid==feedback.id, 
+                ChallengeFeedbackAnswers.questionid==feedback.id,
                 ChallengeFeedbackAnswers.teamid==teamid
             )).first()
             answer = ""
             if answer_entry is not None:
                 answer = answer_entry.answer
             feedbacks.append({
-                'id': feedback.id, 
-                'question': feedback.question, 
+                'id': feedback.id,
+                'question': feedback.question,
                 'type': feedback.inputtype,
                 'extraarg1' : feedback.extraarg1,
                 'extraarg2' : feedback.extraarg2,
@@ -135,31 +133,32 @@ def load(app):
         return jsonify(data)
 
     @app.route('/chal/<int:chalid>/feedbacks/answer', methods=['POST'])
-    @require_verified_emails
-    @viewable_without_authentication(status_code=403)
+    @authed_only
     def chal_feedback_answer(chalid):
-        teamid = session.get('id')
+        team = get_current_team()
+        teamid = team.id
         success_msg = "Thank you for your feedback"
 
         # Get solved challenge ids
         solves = []
-        if utils.user_can_view_challenges():
-            if utils.authed():
-                solves = Solves.query\
-                    .join(Teams, Solves.teamid == Teams.id)\
-                    .filter(Solves.teamid == session['id'])\
-                    .all()
+        if authed():
+            team = get_current_team()
+            solves = Solves.query\
+                .join(Teams, Solves.team_id == Teams.id)\
+                .filter(Solves.team_id == team.id)\
+                .all()
         solve_ids = []
         for solve in solves:
-            solve_ids.append(solve.chalid)
+            solve_ids.append(solve.challenge_id)
 
         # Get feedback ids for this challenge
         feedback_ids = []
         for feedback in ChallengeFeedbackQuestions.query.filter_by(chalid=chalid).all():
             feedback_ids.append(feedback.id)
 
-        if (utils.authed() and utils.is_verified() and chalid in solve_ids):
-            for name, value in request.form.iteritems():
+        if (authed() and chalid in solve_ids):
+
+            for name, value in request.form.items():
                 name_tokens = name.split("-")
                 if name_tokens[0] == "feedback":
                     feedbackid = int(name_tokens[1])
@@ -217,6 +216,7 @@ def load(app):
     @app.route('/admin/feedbacks', defaults={'feedbackid': None}, methods=['POST', 'GET'])
     @app.route('/admin/feedbacks/<int:feedbackid>', methods=['GET', 'DELETE'])
     @admins_only
+    @bypass_csrf_protection
     def admin_feedbacks(feedbackid):
         if feedbackid:
             feedback = ChallengeFeedbackQuestions.query.filter_by(id=feedbackid).first_or_404()
@@ -273,78 +273,66 @@ def load(app):
                 db.session.close()
                 return jsonify(json_data)
 
-    @app.route('/admin/feedbacks/export', methods=['GET', 'POST'])
+    @app.route('/admin/feedbacks/export', methods=['GET'])
     @admins_only
     def admin_export_feedbacks():
-        backup = export_feedbacks()
-        ctf_name = utils.ctf_name()
-        day = datetime.datetime.now().strftime("%Y-%m-%d")
-        full_name = "{}.{}_feedbacks.zip".format(ctf_name, day)
-        return send_file(backup, as_attachment=True, attachment_filename=full_name)
+        feedbacks = export_feedbacks()
+        json_data = json.dumps(feedbacks, indent=4)
+        buffer = io.BytesIO()
+        buffer.write(json_data.encode('utf-8'))
+        buffer.seek(0)
 
-    @app.route('/admin/feedbacks/export_csv', methods=['GET', 'POST'])
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name="data.json",
+            mimetype="application/json"
+        )
+
+    @app.route('/admin/feedbacks/export_csv', methods=['GET'])
     @admins_only
     def admin_export_feedbacks_csv():
-        backup = export_feedbacks_csv()
-        ctf_name = utils.ctf_name()
-        day = datetime.datetime.now().strftime("%Y-%m-%d")
-        full_name = "{}.{}_feedbacks.csv".format(ctf_name, day)
-        return send_file(backup, as_attachment=True, attachment_filename=full_name, cache_timeout=5)
+        feedbacks = export_feedbacks()
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=feedbacks[0].keys())
+        writer.writeheader()
+        writer.writerows(feedbacks)
+        buffer.seek(0)
+
+        return send_file(
+            io.BytesIO(buffer.getvalue().encode('utf-8')),
+            as_attachment=True,
+            download_name="data.csv",
+            mimetype="text/csv"
+        )
 
 def export_feedbacks():
-    db = dataset.connect(get_app_config('SQLALCHEMY_DATABASE_URI'))
-    segments = ['feedbacks']
-
-    groups = {
-        'feedbacks': [
-            'challenges',
-            'challenge_feedback_questions',
-            'challenge_feedback_answers',
-        ]
-    }
-
-    # Backup database
-    backup = six.BytesIO()
-
-    backup_zip = zipfile.ZipFile(backup, 'w')
-
-    for segment in segments:
-        group = groups[segment]
-        for item in group:
-            result = db[item].all()
-            result_file = six.BytesIO()
-            datafreeze.freeze(result, format='ctfd', fileobj=result_file)
-            result_file.seek(0)
-            backup_zip.writestr('db/{}.json'.format(item), result_file.read())
-
-    backup_zip.close()
-    backup.seek(0)
-    return backup
-
-def export_feedbacks_csv():
-    output_lines = []
-    output_lines.append("challenge_id,challenge,challenge_desc,challenge_category,challenge_maxattempts,challenge_value,team_id,team,team_email,is_solved,solve_timestamp,num_attempts,feedback_question_id,feedback_question,feedback_question_type,feedback_question_arg1,feedback_question_arg2,feedback_answer,feedback_answer_timestamp")
+    export = []
+    # Get all challenges
     challenges = Challenges.query.all()
+    # sort challenges by category
+    challenges = sorted(challenges, key=lambda x: x.category)
     for challenge in challenges:
+
+        # Get questions for this challenge
         questions = ChallengeFeedbackQuestions.query.filter_by(chalid=challenge.id).all()
         for question in questions:
-            teams = Teams.query.all()
-            for team in teams:
-                solve = Solves.query.filter(and_(Solves.chalid==challenge.id, Solves.teamid==team.id)).first()
-                wrongkeys = WrongKeys.query.filter(and_(WrongKeys.chalid==challenge.id, WrongKeys.teamid==team.id)).all()
-                answer = ChallengeFeedbackAnswers.query.filter(and_(ChallengeFeedbackAnswers.questionid==question.id, ChallengeFeedbackAnswers.teamid==team.id)).first()
-                fields = [challenge.id, challenge.name, challenge.description, challenge.category, challenge.max_attempts, challenge.value]
-                fields.extend([team.id, team.name, team.email])
-                if solve is None:
-                    fields.extend([0, ''])
-                    fields.append(len(wrongkeys))
-                else:
-                    fields.extend([1, solve.date])
-                    fields.append(len(wrongkeys) + 1)
-                fields.extend([question.id, question.question, ('Rating' if question.inputtype==0 else 'Text'), question.extraarg1, question.extraarg2])
-                if answer is None:
-                    fields.extend(['', ''])
-                else:
-                    fields.extend([answer.answer, answer.timestamp])
-                output_lines.append(','.join(map(str, fields)))
-    return six.StringIO('\n'.join(output_lines))
+
+            # For each question, get the answers
+            answers = ChallengeFeedbackAnswers.query.filter_by(questionid=question.id).all()
+            for answer in answers:
+
+                # get team by teamid
+                team = Teams.query.filter_by(id=answer.teamid).first()
+
+                # put everything in a dict
+                export.append({
+                    'challenge': challenge.name,
+                    'category': challenge.category,
+                    'team': team.name,
+                    'team_email': team.email,
+                    'question': question.question,
+                    'answer': answer.answer,
+                })
+
+    return export

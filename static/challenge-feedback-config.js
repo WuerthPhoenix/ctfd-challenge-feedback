@@ -1,3 +1,6 @@
+const htmlentities = CTFd.utils.html.htmlEntities;
+const ezq = CTFd.ui.ezq.ezAlert;
+
 function load_feedback_modal(method, feedbackid) {
     if (method == 'create') {
         $('#feedback-modal-question').val('');
@@ -17,13 +20,23 @@ function deletefeedback(feedbackid){
     ezq({
         title: "Delete Question",
         body: "Are you sure you want to delete this question?",
+        button: "Yes",
         success: function() {
-            $.delete(script_root + '/admin/feedbacks/' + feedbackid, function(data, textStatus, jqXHR){
-                if (jqXHR.status == 204){
+            $.ajax({
+                url: CTFd.config.urlRoot + '/admin/feedbacks/' + feedbackid,
+                type: 'DELETE',
+                success: function() {
                     var chalid = $("#update-feedbacks").attr('chal-id');
                     loadfeedbacks(chalid);
                 }
             });
+
+            // $.delete(CTFd.config.urlRoot + '/admin/feedbacks/' + feedbackid, function(data, textStatus, jqXHR){
+            //     if (jqXHR.status == 204){
+            //         var chalid = $("#update-feedbacks").attr('chal-id');
+            //         loadfeedbacks(chalid);
+            //     }
+            // });
         }
     });
 }
@@ -31,7 +44,7 @@ function deletefeedback(feedbackid){
 var FEEDBACK_TYPES = ["Rating", "Text"];
 
 function loadanswers(feedbackid, cb) {
-    $.get(script_root + '/admin/feedbacks/{0}/answers'.format(feedbackid), function(data){
+    $.get(CTFd.config.urlRoot + '/admin/feedbacks/{0}/answers'.format(feedbackid), function(data){
         var table = $('#answersboard > tbody');
         table.empty();
         for (var i = 0; i < data.answers.length; i++) {
@@ -50,7 +63,7 @@ function loadanswers(feedbackid, cb) {
 }
 
 function loadfeedbacks(chal, cb) {
-    $.get(script_root + '/admin/chal/{0}/feedbacks'.format(chal), function(data){
+    $.get(CTFd.config.urlRoot + '/admin/chal/{0}/feedbacks'.format(chal), function(data){
         var table = $('#feedbacksboard > tbody');
         table.empty();
         for (var i = 0; i < data.feedbacks.length; i++) {
@@ -83,6 +96,14 @@ function loadfeedbacks(chal, cb) {
 }
 
 $(document).ready(function () {
+
+    document.querySelectorAll("#nonce").forEach(function(nonce) {
+        if (nonce.value === "") {
+            nonce.value = init.csrfNonce;
+        }
+    });
+
+    console.log("xxxxxxxxxxxxxxx")
     $('.view-feedback').click(function (e) {
         var chal_id = $(this).attr('chal-id');
         loadfeedbacks(chal_id, function() {
@@ -103,7 +124,7 @@ $(document).ready(function () {
         $(this).serializeArray().map(function (x) {
             params[x.name] = x.value;
         });
-        $.post(script_root + $(this).attr('action'), params, function (data) {
+        $.post(CTFd.config.urlRoot + $(this).attr('action'), params, function (data) {
             loadfeedbacks(params['chal']);
         });
         $("#feedback-modal").modal('hide');
