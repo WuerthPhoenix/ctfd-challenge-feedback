@@ -13,7 +13,7 @@ const FEEDBACK_TYPES = {
 document.addEventListener('DOMContentLoaded', function() {
     var feedbackInlineForm = `<div id="chal-feedback-group">
       <br>
-      <h4 class="text-center pb-1">Give Feedback</h4>
+      <h4 class="text-center pb-1 chal-feedback-title">Can you give us some feedback?</h4>
       
       <form id="chal-feedback-form" method="POST" action="/chal/{0}/feedbacks/answer" class="form-horizontal max-500px center bg-form bg-form--no-bg">
         <input id="nonce" name="nonce" type="hidden" value="{1}">
